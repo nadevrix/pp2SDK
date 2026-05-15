@@ -17,6 +17,7 @@ import type {
   PaymentCallbacks,
   PollarPayConfig,
   PayManualCompleteResponse,
+  WaitForPaymentOptions,
 } from './types';
 import { FINAL_STATUSES, PollarPayError, PAY_ERROR_CODES } from './types';
 
@@ -25,8 +26,8 @@ const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 /** Default base URLs by environment. */
 const BASE_URLS: Record<string, string> = {
-  testnet: 'https://pay.api.pollar.xyz/api',
-  mainnet: 'https://pay.api.pollar.xyz/api',
+  testnet: 'https://pp1back.vercel.app/api',
+  mainnet: 'https://pp1back.vercel.app/api',
   local: 'http://localhost:3000/api',
 };
 
@@ -172,78 +173,110 @@ export class PollarPayClient {
   /**
    * Polls for payment status updates with callbacks.
    *
-   * Automatically stops polling when the transaction reaches a final state.
+   * Stops automatically when the transaction reaches a final state, when
+   * `options.maxWaitMs` is reached, or when too many consecutive errors occur.
    * Returns a `stop()` function to cancel polling manually.
    *
+   * Callbacks may be async — the SDK awaits them so the merchant can do work
+   * like `await sendEmail()` inside `onCompleted` and know it finished before
+   * `stop()` resolves.
+   *
+   * Errors apply exponential backoff (5s → 10s → 20s → 60s, capped) and give up
+   * after `maxConsecutiveErrors` total failures.
+   *
    * @param transactionId — The `transaction_id` from `createIntent()`.
-   * @param callbacks — `onUpdate`, `onCompleted`, `onOverpaid`, `onFailed`, `onError`.
-   * @param intervalMs — Polling interval in milliseconds. Default: `5000` (5 seconds).
+   * @param callbacks — `onUpdate`, `onCompleted`, `onOverpaid`, `onFailed`, `onError`, `onTimeout`.
+   * @param options — Polling options. Pass a number for backwards compat (interval ms).
    * @returns A function that stops polling when called.
    *
    * @example
    * ```typescript
    * const stop = pay.waitForPayment(transactionId, {
    *   onUpdate: (s) => console.log(`Status: ${s.status}, paid: ${s.amount_paid}`),
-   *   onCompleted: (s) => console.log('Payment completed!'),
-   *   onFailed: (s) => console.log(`Payment failed: ${s.status}`),
+   *   onCompleted: async (s) => { await sendEmail(s); },
+   *   onFailed: (s) => console.log(`Failed: ${s.status}`),
    *   onError: (e) => console.error('Polling error:', e.message),
-   * });
-   *
-   * // To stop polling early:
-   * stop();
+   *   onTimeout: () => console.log('Gave up after maxWaitMs'),
+   * }, { intervalMs: 5000, maxWaitMs: 16 * 60 * 1000 });
    * ```
    */
   waitForPayment(
     transactionId: string,
     callbacks: PaymentCallbacks,
-    intervalMs: number = DEFAULT_POLL_INTERVAL_MS,
+    options: number | WaitForPaymentOptions = {},
   ): () => void {
+    // Backwards compat: previously the 3rd argument was just intervalMs.
+    const opts: WaitForPaymentOptions =
+      typeof options === 'number' ? { intervalMs: options } : options;
+
+    const intervalMs           = opts.intervalMs           ?? DEFAULT_POLL_INTERVAL_MS;
+    const maxWaitMs            = opts.maxWaitMs            ?? 16 * 60 * 1000; // intent expires at 15 min, give 1 min margin
+    const maxConsecutiveErrors = opts.maxConsecutiveErrors ?? 5;
+
     let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
+    let consecutiveErrors = 0;
+
+    const stop = () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
 
     const poll = async (): Promise<void> => {
       if (stopped) return;
 
+      if (Date.now() - startedAt >= maxWaitMs) {
+        stopped = true;
+        await callbacks.onTimeout?.();
+        return;
+      }
+
       try {
         const result = await this.checkStatus(transactionId);
         const data: PayStatusData = result.data;
+        consecutiveErrors = 0;
 
-        callbacks.onUpdate?.(data);
+        await callbacks.onUpdate?.(data);
 
         if (data.status === 'completed') {
-          callbacks.onCompleted?.(data);
+          await callbacks.onCompleted?.(data);
           stopped = true;
           return;
         }
 
         if (data.status === 'overpaid') {
-          callbacks.onOverpaid?.(data);
+          await callbacks.onOverpaid?.(data);
           stopped = true;
           return;
         }
 
         if (FINAL_STATUSES.includes(data.status) || data.is_expired) {
-          callbacks.onFailed?.(data);
+          await callbacks.onFailed?.(data);
           stopped = true;
           return;
         }
 
-        // Schedule next poll
-        setTimeout(poll, intervalMs);
+        timer = setTimeout(poll, intervalMs);
       } catch (error: unknown) {
         const err = error instanceof Error ? error : new Error(String(error));
-        callbacks.onError?.(err);
+        consecutiveErrors += 1;
+        await callbacks.onError?.(err);
 
-        // Continue polling on error (transient failures)
-        if (!stopped) setTimeout(poll, intervalMs);
+        if (consecutiveErrors >= maxConsecutiveErrors) {
+          stopped = true;
+          await callbacks.onTimeout?.();
+          return;
+        }
+
+        // Exponential backoff: 5s → 10s → 20s → 40s, capped at 60s
+        const backoff = Math.min(intervalMs * 2 ** (consecutiveErrors - 1), 60_000);
+        if (!stopped) timer = setTimeout(poll, backoff);
       }
     };
 
-    // Start first poll immediately
     poll();
-
-    return () => {
-      stopped = true;
-    };
+    return stop;
   }
 
   // ─── Internal HTTP ──────────────────────────────────────────────────────────

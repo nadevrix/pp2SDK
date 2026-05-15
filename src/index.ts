@@ -13,6 +13,7 @@ export type {
   PayStatusData,
   PaymentStatus,
   PaymentCallbacks,
+  WaitForPaymentOptions,
   PayErrorCode,
 } from './types';
 

@@ -158,25 +158,58 @@ export interface PayManualCompleteResponse {
 
 // ─── Callbacks for waitForPayment() ─────────────────────────────────────────
 
-/** Callback functions for `waitForPayment()` polling. */
+/**
+ * Callback functions for `waitForPayment()` polling.
+ *
+ * All callbacks may return `void` or a `Promise<void>` — the SDK awaits
+ * promises so you can do async work like `await sendEmail(status)` inside
+ * `onCompleted` and trust it finished before the next event.
+ */
 export interface PaymentCallbacks {
   /** Called on every poll with the latest status. */
-  onUpdate?: (status: PayStatusData) => void;
+  onUpdate?: (status: PayStatusData) => void | Promise<void>;
 
   /** Called once when payment reaches `completed` status. */
-  onCompleted?: (status: PayStatusData) => void;
+  onCompleted?: (status: PayStatusData) => void | Promise<void>;
 
   /** Called once when payment reaches `overpaid` status. */
-  onOverpaid?: (status: PayStatusData) => void;
+  onOverpaid?: (status: PayStatusData) => void | Promise<void>;
 
   /**
    * Called once when payment reaches a terminal status
    * other than `completed` or `overpaid` (expired, underpaid, anomaly, etc.).
    */
-  onFailed?: (status: PayStatusData) => void;
+  onFailed?: (status: PayStatusData) => void | Promise<void>;
 
-  /** Called when a polling request fails. Polling continues unless stopped. */
-  onError?: (error: Error) => void;
+  /** Called when a polling request fails. Polling continues with backoff. */
+  onError?: (error: Error) => void | Promise<void>;
+
+  /**
+   * Called once when polling gives up because `maxWaitMs` was reached or
+   * `maxConsecutiveErrors` was hit. Useful for showing a "took too long" UI.
+   */
+  onTimeout?: () => void | Promise<void>;
+}
+
+// ─── Options for waitForPayment() ───────────────────────────────────────────
+
+/** Options controlling how `waitForPayment()` polls. */
+export interface WaitForPaymentOptions {
+  /** Polling interval in milliseconds. Default: `5000` (5 seconds). */
+  intervalMs?: number;
+
+  /**
+   * Maximum total time to keep polling, in milliseconds.
+   * Default: `16 * 60 * 1000` (1 min after intent expires).
+   * When reached, `onTimeout` is called once and polling stops.
+   */
+  maxWaitMs?: number;
+
+  /**
+   * After this many consecutive errors, polling gives up.
+   * Default: `5`. Each error applies exponential backoff (5s → 10s → 20s → 40s, capped at 60s).
+   */
+  maxConsecutiveErrors?: number;
 }
 
 // ─── Error ──────────────────────────────────────────────────────────────────
