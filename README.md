@@ -1,10 +1,10 @@
 # @pollar/pay
 
-Accept USDC payments on Stellar — part of the [Pollar](https://pollar.xyz) SDK.
+Accept USDC payments on Stellar — the official SDK for Pollar Pay.
 
 `@pollar/pay` lets your app generate USDC payment intents and watch them settle on-chain. Customers can pay from **Binance, Meru, Lobstr or any Stellar-compatible wallet**. Settlement happens in **3 – 5 seconds**, 24/7, with no bank or intermediary involved.
 
-Uses the same publishable API key you already have from your Pollar Pay branch — no extra credentials.
+Authenticate with the publishable API key issued by your Pollar Pay branch — no extra credentials.
 
 ## Install
 
@@ -166,11 +166,6 @@ const result = await pay.checkStatus(transactionId);
 const hash = result.data.forward_tx_hash;
 const url = `https://stellar.expert/explorer/public/tx/${hash}`;
 ```
-
-## Related packages
-
-- [`@pollar/core`](https://www.npmjs.com/package/@pollar/core) — Authentication and Stellar transactions
-- [`@pollar/react`](https://www.npmjs.com/package/@pollar/react) — React UI components
 
 ## License
 
