@@ -1,242 +1,271 @@
 // ─── @pollar/pay — Type definitions ──────────────────────────────────────────
-// All types used by PollarPayClient for payment intents, status polling,
-// and callback-driven flows. Follows the same naming conventions as @pollar/core.
+// Tipos públicos del SDK. Quedan centralizados acá para que el cliente y los
+// helpers compartan la misma forma exacta.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Configuration for the PollarPayClient.
+ * Red Stellar sobre la que se va a operar. El SDK la deduce del prefijo de la
+ * `apiKey` (`pub_testnet_…` → TESTNET, `pub_mainnet_…` → MAINNET), pero también
+ * la podés leer de cualquier intent o status devuelto por el backend.
+ */
+export type StellarNetwork = 'TESTNET' | 'MAINNET';
+
+/**
+ * Configuración del `PollarPayClient`.
  *
- * Uses the same `apiKey` (publishable key) that the merchant already has
- * from Pollar — no separate credentials required.
+ * El único campo obligatorio es `apiKey`. Todo lo demás se autoresuelve.
  *
  * @example
- * ```typescript
+ * ```ts
  * const pay = new PollarPayClient({
  *   apiKey: 'pub_testnet_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
  * });
  * ```
  */
 export interface PollarPayConfig {
-  /** Pollar publishable API key (`pub_testnet_xxx` or `pub_mainnet_xxx`). */
-  apiKey: string;
+    /** API key publishable del comercio (`pub_testnet_…` o `pub_mainnet_…`). */
+    apiKey: string;
 
-  /**
-   * Override the Pollar Pay backend URL.
-   * Defaults to the hosted Pollar Pay API.
-   * Use `http://localhost:3000/api` for local development.
-   */
-  baseUrl?: string;
+    /**
+     * Override de la URL del backend Pollar Pay. Por defecto se resuelve a la
+     * API hosteada. Usá `http://localhost:3000/api` para desarrollo local.
+     */
+    baseUrl?: string;
 }
 
 // ─── Payment Intent ─────────────────────────────────────────────────────────
 
-/** Successful response from `createIntent()`. */
+/** Respuesta exitosa de `createIntent()`. */
 export interface PayIntentResponse {
-  success: true;
-  data: PayIntentData;
+    success: true;
+    data: PayIntentData;
 }
 
-/** Payment intent data returned after creating an intent. */
+/** Información del cobro recién creado. */
 export interface PayIntentData {
-  /** Unique ID for this payment intent. Use with `checkStatus()` and `waitForPayment()`. */
-  transaction_id: string;
+    /** ID único del cobro. Usalo en `checkStatus()` y `waitForPayment()`. */
+    transaction_id: string;
 
-  /** Stellar public key where the customer should send USDC. */
-  wallet_address: string;
+    /** Wallet Stellar destino al que el cliente envía los USDC. */
+    wallet_address: string;
 
-  /** The reason or purpose for this payment intent. */
-  reason: string;
+    /** Razón / motivo del cobro (lo que se muestra en el dashboard). */
+    reason: string;
 
-  /** USDC amount the customer needs to pay. */
-  amount: string;
+    /** Monto en USDC que el cliente tiene que pagar (string para no perder precisión). */
+    amount: string;
 
-  /** Asset code — always `USDC` currently. */
-  asset: string;
+    /** Asset code — actualmente siempre `USDC`. */
+    asset: string;
 
-  /** ISO 8601 timestamp when this payment intent expires (15 minutes from creation). */
-  expires_at: string;
+    /** Timestamp ISO 8601 de expiración (15 minutos desde la creación). */
+    expires_at: string;
 
-  /** Stellar network (`TESTNET` or `MAINNET`). */
-  network: string;
+    /** Red Stellar (`TESTNET` o `MAINNET`). */
+    network: StellarNetwork;
 }
 
 // ─── Payment Status ─────────────────────────────────────────────────────────
 
 /**
- * All possible statuses for a payment intent.
+ * Estados posibles de un cobro.
  *
- * | Status         | Meaning                                              |
- * |----------------|------------------------------------------------------|
- * | `pending`      | Waiting for payment from customer                    |
- * | `completed`    | Exact amount received, funds forwarded to merchant   |
- * | `overpaid`     | More than expected received (support contact included)|
- * | `underpaid`    | Timer expired with partial payment                   |
- * | `expired`      | Timer expired with zero payment                      |
- * | `refunded`     | Admin issued a refund from treasury                  |
- * | `anomaly`      | Forward failed or unexpected error (needs review)    |
- * | `late_anomaly` | Reserved for future edge cases                       |
+ * | Status         | Cuándo ocurre                                              |
+ * |----------------|------------------------------------------------------------|
+ * | `pending`      | Esperando que el cliente pague                             |
+ * | `completed`    | Monto exacto (o más) recibido, fondos enviados al comercio |
+ * | `overpaid`     | El cliente pagó más de lo esperado                         |
+ * | `underpaid`    | Venció el timer con pago parcial                           |
+ * | `expired`      | Venció el timer sin ningún pago                            |
+ * | `refunded`     | Admin emitió un reembolso desde treasury                   |
+ * | `anomaly`      | Forward falló o error inesperado — requiere revisión       |
+ * | `late_anomaly` | Reservado para casos edge (actualmente no se asigna)       |
  */
 export type PaymentStatus =
-  | 'pending'
-  | 'completed'
-  | 'overpaid'
-  | 'underpaid'
-  | 'expired'
-  | 'refunded'
-  | 'anomaly'
-  | 'late_anomaly';
+    | 'pending'
+    | 'completed'
+    | 'overpaid'
+    | 'underpaid'
+    | 'expired'
+    | 'refunded'
+    | 'anomaly'
+    | 'late_anomaly';
 
-/** Statuses that indicate the payment flow has ended. */
+/** Estados que indican que el flujo terminó (no va a haber más updates). */
 export const FINAL_STATUSES: readonly PaymentStatus[] = [
-  'completed',
-  'overpaid',
-  'expired',
-  'underpaid',
-  'refunded',
-  'anomaly',
-  'late_anomaly',
+    'completed',
+    'overpaid',
+    'expired',
+    'underpaid',
+    'refunded',
+    'anomaly',
+    'late_anomaly',
 ] as const;
 
-/** Successful response from `checkStatus()`. */
+/** Respuesta exitosa de `checkStatus()`. */
 export interface PayStatusResponse {
-  success: true;
-  data: PayStatusData;
+    success: true;
+    data: PayStatusData;
 }
 
-/** Detailed payment status data. */
+/** Información detallada del estado del cobro. */
 export interface PayStatusData {
-  /** The payment intent ID. */
-  transaction_id: string;
+    /** ID del cobro. */
+    transaction_id: string;
 
-  /** Current status of the payment. */
-  status: PaymentStatus;
+    /** Estado actual. */
+    status: PaymentStatus;
 
-  /** Original USDC amount requested. */
-  amount_expected: string;
+    /** Monto original solicitado, en USDC (string). */
+    amount_expected: string;
 
-  /** The reason or purpose for this payment intent. */
-  reason?: string;
+    /** Motivo del cobro. */
+    reason?: string;
 
-  /** Total USDC received so far. */
-  amount_paid: string;
+    /** Total USDC detectado on-chain hasta ahora. */
+    amount_paid: string;
 
-  /** USDC remaining to complete payment (`max(0, expected - paid)`). */
-  remaining: string;
+    /** Saldo restante para cerrar el cobro (`max(0, expected - paid)`). */
+    remaining: string;
 
-  /** Asset code (`USDC`). */
-  asset: string;
+    /** Asset code (`USDC`). */
+    asset: string;
 
-  /** Stellar wallet address assigned to this payment. */
-  wallet_address: string;
+    /** Wallet Stellar asignada a este cobro. */
+    wallet_address: string;
 
-  /** ISO 8601 expiration timestamp. */
-  expires_at: string;
+    /** Timestamp ISO 8601 de expiración. */
+    expires_at: string;
 
-  /** Seconds remaining until expiration. `0` if expired. */
-  time_remaining_seconds: number;
+    /** Segundos restantes hasta la expiración. `0` si ya expiró. */
+    time_remaining_seconds: number;
 
-  /** Whether the payment timer has expired. */
-  is_expired: boolean;
+    /** Si el timer del cobro ya venció. */
+    is_expired: boolean;
 
-  /** ISO 8601 creation timestamp. */
-  created_at: string;
+    /** Timestamp ISO 8601 de creación. */
+    created_at: string;
 
-  /** Support contact info — only present for anomaly statuses. */
-  support?: {
-    contact: string;
-    message: string;
-  };
+    /**
+     * Fee de Pollar Pay aplicado al cobro (en USDC). Solo viene cuando el
+     * cobro alcanza un estado final con `forward_status='completed'`.
+     */
+    fee_amount?: string;
+
+    /**
+     * Monto neto que llegó a la wallet del comercio (gross − fee). Solo viene
+     * cuando el cobro tiene `forward_status='completed'`.
+     */
+    payout_amount?: string;
+
+    /** `true` si la tx entró dentro de las 50 transacciones gratuitas del plan Free. */
+    is_free_tx?: boolean;
+
+    /** Estado del forward de fondos al `payout_wallet` del comercio. */
+    forward_status?: 'pending' | 'completed' | 'failed' | 'skipped';
+
+    /** Hash Stellar del forward al comercio. Útil para construir un link a Stellar Expert. */
+    forward_tx_hash?: string;
+
+    /** Info de contacto de soporte — solo viene en estados de anomalía / overpaid. */
+    support?: {
+        contact: string;
+        message: string;
+    };
 }
 
 // ─── Manual Completion ──────────────────────────────────────────────────────
 
-/** Successful response from `manualComplete()`. */
+/** Respuesta exitosa de `manualComplete()`. */
 export interface PayManualCompleteResponse {
-  success: true;
-  message: string;
+    success: true;
+    message: string;
+    forwarded_amount?: string | null;
+    forward_status?: 'completed' | 'failed' | 'skipped';
+    forward_tx_hash?: string | null;
 }
 
-// ─── Callbacks for waitForPayment() ─────────────────────────────────────────
+// ─── Callbacks para waitForPayment() ────────────────────────────────────────
 
 /**
- * Callback functions for `waitForPayment()` polling.
+ * Callbacks para `waitForPayment()`.
  *
- * All callbacks may return `void` or a `Promise<void>` — the SDK awaits
- * promises so you can do async work like `await sendEmail(status)` inside
- * `onCompleted` and trust it finished before the next event.
+ * Todos los callbacks pueden devolver `void` o `Promise<void>` — el SDK awaitea
+ * promesas, así que podés hacer trabajo async como `await sendEmail(status)`
+ * dentro de `onCompleted` y confiar en que terminó antes del siguiente evento.
  */
 export interface PaymentCallbacks {
-  /** Called on every poll with the latest status. */
-  onUpdate?: (status: PayStatusData) => void | Promise<void>;
+    /** Se llama en cada poll con el último estado. */
+    onUpdate?: (status: PayStatusData) => void | Promise<void>;
 
-  /** Called once when payment reaches `completed` status. */
-  onCompleted?: (status: PayStatusData) => void | Promise<void>;
+    /** Se llama una vez cuando el cobro alcanza `completed`. */
+    onCompleted?: (status: PayStatusData) => void | Promise<void>;
 
-  /** Called once when payment reaches `overpaid` status. */
-  onOverpaid?: (status: PayStatusData) => void | Promise<void>;
+    /** Se llama una vez cuando el cobro alcanza `overpaid`. */
+    onOverpaid?: (status: PayStatusData) => void | Promise<void>;
 
-  /**
-   * Called once when payment reaches a terminal status
-   * other than `completed` or `overpaid` (expired, underpaid, anomaly, etc.).
-   */
-  onFailed?: (status: PayStatusData) => void | Promise<void>;
+    /**
+     * Se llama una vez cuando el cobro alcanza un estado final distinto de
+     * `completed`/`overpaid` (`expired`, `underpaid`, `anomaly`, etc.).
+     */
+    onFailed?: (status: PayStatusData) => void | Promise<void>;
 
-  /** Called when a polling request fails. Polling continues with backoff. */
-  onError?: (error: Error) => void | Promise<void>;
+    /** Se llama si un poll falla (la rotación sigue con backoff exponencial). */
+    onError?: (error: Error) => void | Promise<void>;
 
-  /**
-   * Called once when polling gives up because `maxWaitMs` was reached or
-   * `maxConsecutiveErrors` was hit. Useful for showing a "took too long" UI.
-   */
-  onTimeout?: () => void | Promise<void>;
+    /**
+     * Se llama si `maxWaitMs` se cumple o se alcanzan demasiados errores
+     * consecutivos. Útil para mostrar un UI tipo "el cobro tardó demasiado".
+     */
+    onTimeout?: () => void | Promise<void>;
 }
 
-// ─── Options for waitForPayment() ───────────────────────────────────────────
+// ─── Opciones para waitForPayment() ─────────────────────────────────────────
 
-/** Options controlling how `waitForPayment()` polls. */
+/** Opciones que controlan cómo polea `waitForPayment()`. */
 export interface WaitForPaymentOptions {
-  /** Polling interval in milliseconds. Default: `5000` (5 seconds). */
-  intervalMs?: number;
+    /** Intervalo de polling en ms. Default: `5000` (5 segundos). */
+    intervalMs?: number;
 
-  /**
-   * Maximum total time to keep polling, in milliseconds.
-   * Default: `16 * 60 * 1000` (1 min after intent expires).
-   * When reached, `onTimeout` is called once and polling stops.
-   */
-  maxWaitMs?: number;
+    /**
+     * Tiempo máximo total que vamos a polear (ms).
+     * Default: `16 * 60 * 1000` (1 minuto después de que expira el intent).
+     * Al llegar al máximo, llamamos a `onTimeout` y paramos.
+     */
+    maxWaitMs?: number;
 
-  /**
-   * After this many consecutive errors, polling gives up.
-   * Default: `5`. Each error applies exponential backoff (5s → 10s → 20s → 40s, capped at 60s).
-   */
-  maxConsecutiveErrors?: number;
+    /**
+     * Cantidad de errores consecutivos antes de rendirse.
+     * Default: `5`. Cada error aplica backoff exponencial (5s → 10s → 20s → 40s, tope 60s).
+     */
+    maxConsecutiveErrors?: number;
 }
 
 // ─── Error ──────────────────────────────────────────────────────────────────
 
-/** Error codes specific to Pollar Pay operations. */
+/** Códigos de error que arroja el SDK. */
 export const PAY_ERROR_CODES = {
-  /** The provided API key is invalid or does not have Pollar Pay enabled. */
-  INVALID_API_KEY: 'INVALID_API_KEY',
-  /** The amount is outside the allowed range (0.01 – 1,000,000 USDC). */
-  INVALID_AMOUNT: 'INVALID_AMOUNT',
-  /** All pool wallets are currently in use. Retry in ~1 minute. */
-  NO_WALLETS_AVAILABLE: 'NO_WALLETS_AVAILABLE',
-  /** The requested transaction was not found. */
-  TRANSACTION_NOT_FOUND: 'TRANSACTION_NOT_FOUND',
-  /** A network or server error occurred. */
-  NETWORK_ERROR: 'NETWORK_ERROR',
+    /** La API key es inválida o no tiene Pollar Pay habilitado. */
+    INVALID_API_KEY: 'INVALID_API_KEY',
+    /** El monto está fuera de rango (0.01 – 1,000,000 USDC). */
+    INVALID_AMOUNT: 'INVALID_AMOUNT',
+    /** Todas las wallets del pool están ocupadas. Reintentar en ~1 minuto. */
+    NO_WALLETS_AVAILABLE: 'NO_WALLETS_AVAILABLE',
+    /** El cobro consultado no existe. */
+    TRANSACTION_NOT_FOUND: 'TRANSACTION_NOT_FOUND',
+    /** Error de red o de servidor. */
+    NETWORK_ERROR: 'NETWORK_ERROR',
 } as const;
 
 export type PayErrorCode = (typeof PAY_ERROR_CODES)[keyof typeof PAY_ERROR_CODES];
 
-/** Error thrown by PollarPayClient methods. */
+/** Error que arrojan los métodos del `PollarPayClient`. */
 export class PollarPayError extends Error {
-  readonly code: PayErrorCode;
+    readonly code: PayErrorCode;
 
-  constructor(code: PayErrorCode, message: string) {
-    super(message);
-    this.name = 'PollarPayError';
-    this.code = code;
-  }
+    constructor(code: PayErrorCode, message: string) {
+        super(message);
+        this.name = 'PollarPayError';
+        this.code = code;
+    }
 }

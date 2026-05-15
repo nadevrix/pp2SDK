@@ -1,332 +1,340 @@
 // ─── @pollar/pay — PollarPayClient ───────────────────────────────────────────
-// Main client class for accepting USDC payments on Stellar.
+// Cliente principal para aceptar pagos en USDC sobre Stellar.
 //
-// Design decisions:
-//   - Uses native `fetch` instead of axios to match @pollar/core's zero-dep approach
-//   - Sends `x-pollar-api-key` header (same as @pollar/core) for authentication
-//   - Auto-resolves baseUrl from the apiKey prefix (pub_testnet_ → testnet API)
-//   - All methods throw PollarPayError with typed error codes
-//
-// This client is framework-agnostic — works in Node.js, browsers, and edge runtimes.
+// Diseño:
+//   - `fetch` nativo, sin dependencias externas → corre en Node, browser y edge
+//   - Header `x-pollar-api-key` para autenticación
+//   - El baseUrl se autoresuelve a partir del prefijo de la apiKey
+//   - Todos los métodos arrojan `PollarPayError` con un `code` tipado
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type {
-  PayIntentResponse,
-  PayStatusResponse,
-  PayStatusData,
-  PaymentCallbacks,
-  PollarPayConfig,
-  PayManualCompleteResponse,
-  WaitForPaymentOptions,
+    PayIntentResponse,
+    PayStatusResponse,
+    PayStatusData,
+    PaymentCallbacks,
+    PollarPayConfig,
+    PayManualCompleteResponse,
+    WaitForPaymentOptions,
+    StellarNetwork,
 } from './types';
 import { FINAL_STATUSES, PollarPayError, PAY_ERROR_CODES } from './types';
+import { networkFromApiKey } from './stellar';
 
-/** Default polling interval for `waitForPayment()`. */
+/** Intervalo por defecto de `waitForPayment()`. */
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-/** Default base URLs by environment. */
-const BASE_URLS: Record<string, string> = {
-  testnet: 'https://pp1back.vercel.app/api',
-  mainnet: 'https://pp1back.vercel.app/api',
-  local: 'http://localhost:3000/api',
-};
+/** URLs por defecto del backend según red. */
+const BASE_URLS = {
+    testnet: 'https://pp1back.vercel.app/api',
+    mainnet: 'https://pp1back.vercel.app/api',
+    local: 'http://localhost:3000/api',
+} as const;
 
 /**
- * Resolves the backend URL from the apiKey prefix or explicit config.
+ * Resuelve la URL del backend a partir del prefijo de la apiKey o de un override
+ * explícito en config.
  *
- * Key prefixes:
- *   - `pub_testnet_xxx` → testnet
- *   - `pub_mainnet_xxx` → mainnet
- *   - anything else     → local (development)
+ *   - `pub_testnet_…` → testnet
+ *   - `pub_mainnet_…` → mainnet
+ *   - cualquier otra cosa → local (desarrollo)
  */
 function resolveBaseUrl(config: PollarPayConfig): string {
-  if (config.baseUrl) return config.baseUrl;
+    if (config.baseUrl) return config.baseUrl;
 
-  if (config.apiKey.startsWith('pub_mainnet_')) return BASE_URLS.mainnet!;
-  if (config.apiKey.startsWith('pub_testnet_')) return BASE_URLS.testnet!;
+    if (config.apiKey.startsWith('pub_mainnet_')) return BASE_URLS.mainnet;
+    if (config.apiKey.startsWith('pub_testnet_')) return BASE_URLS.testnet;
 
-  return BASE_URLS.local!;
+    return BASE_URLS.local;
 }
 
 /**
- * PollarPayClient — Accept USDC payments on Stellar.
+ * `PollarPayClient` — Cobrá USDC sobre Stellar.
  *
- * This client communicates with the Pollar Pay backend to create payment intents,
- * check payment status, and poll for completion. It uses the same publishable API key
- * (`pub_testnet_xxx` / `pub_mainnet_xxx`) that you already use with `@pollar/core`.
+ * Maneja todo el ciclo de un cobro: crear intent, consultar estado, esperar
+ * pago con polling, cerrar manualmente.
  *
  * @example
- * ```typescript
- * import { PollarPayClient } from '@pollar/pay';
+ * ```ts
+ * import { PollarPayClient, buildSep7PayUri } from '@pollar/pay';
  *
  * const pay = new PollarPayClient({
  *   apiKey: 'pub_testnet_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
  * });
  *
- * // Create a payment intent for 25 USDC
- * const intent = await pay.createIntent(25.00);
- * console.log(intent.data.wallet_address); // Stellar address for QR code
- * console.log(intent.data.transaction_id); // Use for status polling
+ * // 1. Crear un cobro de 25 USDC
+ * const intent = await pay.createIntent(25, 'Pedido #1234');
  *
- * // Poll until completed
- * const stop = pay.waitForPayment(intent.data.transaction_id, {
- *   onCompleted: (status) => console.log('Paid!', status),
- *   onFailed: (status) => console.log('Failed:', status.status),
+ * // 2. Mostrar el QR con la URI SEP-7 que cualquier wallet entiende
+ * const uri = buildSep7PayUri(intent.data);
+ *
+ * // 3. Esperar a que el cliente pague
+ * pay.waitForPayment(intent.data.transaction_id, {
+ *   onCompleted: (s) => console.log('Pagado:', s.amount_paid, 'USDC'),
+ *   onFailed:    (s) => console.log('No completado:', s.status),
  * });
- *
- * // Call stop() to cancel polling manually
  * ```
  */
 export class PollarPayClient {
-  /** The publishable API key used for authentication. */
-  readonly apiKey: string;
+    /** API key publishable que se usa para autenticarse. */
+    readonly apiKey: string;
 
-  /** Resolved backend URL. */
-  private readonly _baseUrl: string;
+    /** Red Stellar derivada de la apiKey (`TESTNET` o `MAINNET`). */
+    readonly network: StellarNetwork;
 
-  constructor(config: PollarPayConfig) {
-    if (!config.apiKey) {
-      throw new PollarPayError(PAY_ERROR_CODES.INVALID_API_KEY, 'apiKey is required');
-    }
+    /** URL del backend resuelta. */
+    private readonly _baseUrl: string;
 
-    this.apiKey = config.apiKey;
-    this._baseUrl = resolveBaseUrl(config);
-  }
-
-  // ─── Create Intent ──────────────────────────────────────────────────────────
-
-  /**
-   * Creates a new payment intent.
-   *
-   * This locks a wallet from the pool for 15 minutes and returns a Stellar
-   * address where the customer should send USDC. The wallet is automatically
-   * released after the timer expires or when payment is detected.
-   *
-   * @param amount — USDC amount to charge (0.01 – 1,000,000).
-   * @param reason — The purpose or reason for the payment intent.
-   * @returns Payment intent with `transaction_id`, `wallet_address`, and `expires_at`.
-   * @throws {PollarPayError} `INVALID_AMOUNT` if amount is out of range.
-   * @throws {PollarPayError} `NO_WALLETS_AVAILABLE` if all pool wallets are locked.
-   * @throws {PollarPayError} `INVALID_API_KEY` if the API key is not valid.
-   */
-  async createIntent(amount: number | string, reason: string): Promise<PayIntentResponse> {
-    const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
-
-    if (isNaN(parsedAmount) || parsedAmount < 0.01 || parsedAmount > 1_000_000) {
-      throw new PollarPayError(
-        PAY_ERROR_CODES.INVALID_AMOUNT,
-        'Amount must be between 0.01 and 1,000,000 USDC',
-      );
-    }
-
-    return this._request<PayIntentResponse>('POST', '/sdk/pay', {
-      amount_expected: parsedAmount.toString(),
-      reason: reason,
-    });
-  }
-
-  // ─── Check Status ───────────────────────────────────────────────────────────
-
-  /**
-   * Checks the current status of a payment intent.
-   *
-   * @param transactionId — The `transaction_id` returned by `createIntent()`.
-   * @returns Current payment status including `amount_paid`, `remaining`, and `time_remaining_seconds`.
-   * @throws {PollarPayError} `TRANSACTION_NOT_FOUND` if the transaction does not exist.
-   */
-  async checkStatus(transactionId: string): Promise<PayStatusResponse> {
-    if (!transactionId) {
-      throw new PollarPayError(
-        PAY_ERROR_CODES.TRANSACTION_NOT_FOUND,
-        'transactionId is required',
-      );
-    }
-
-    const params = new URLSearchParams({ transaction_id: transactionId });
-    return this._request<PayStatusResponse>('GET', `/sdk/status?${params.toString()}`);
-  }
-
-  // ─── Manual Complete ────────────────────────────────────────────────────────
-
-  /**
-   * Manually mark a payment intent as completed.
-   * Useful when a payment is settled off-chain (e.g. in cash).
-   *
-   * @param transactionId — The `transaction_id` returned by `createIntent()`.
-   * @returns Success response.
-   */
-  async manualComplete(transactionId: string): Promise<PayManualCompleteResponse> {
-    if (!transactionId) {
-      throw new PollarPayError(
-        PAY_ERROR_CODES.TRANSACTION_NOT_FOUND,
-        'transactionId is required',
-      );
-    }
-
-    return this._request<PayManualCompleteResponse>('POST', '/sdk/manual-complete', {
-      transaction_id: transactionId,
-    });
-  }
-
-  // ─── Wait for Payment (polling) ─────────────────────────────────────────────
-
-  /**
-   * Polls for payment status updates with callbacks.
-   *
-   * Stops automatically when the transaction reaches a final state, when
-   * `options.maxWaitMs` is reached, or when too many consecutive errors occur.
-   * Returns a `stop()` function to cancel polling manually.
-   *
-   * Callbacks may be async — the SDK awaits them so the merchant can do work
-   * like `await sendEmail()` inside `onCompleted` and know it finished before
-   * `stop()` resolves.
-   *
-   * Errors apply exponential backoff (5s → 10s → 20s → 60s, capped) and give up
-   * after `maxConsecutiveErrors` total failures.
-   *
-   * @param transactionId — The `transaction_id` from `createIntent()`.
-   * @param callbacks — `onUpdate`, `onCompleted`, `onOverpaid`, `onFailed`, `onError`, `onTimeout`.
-   * @param options — Polling options. Pass a number for backwards compat (interval ms).
-   * @returns A function that stops polling when called.
-   *
-   * @example
-   * ```typescript
-   * const stop = pay.waitForPayment(transactionId, {
-   *   onUpdate: (s) => console.log(`Status: ${s.status}, paid: ${s.amount_paid}`),
-   *   onCompleted: async (s) => { await sendEmail(s); },
-   *   onFailed: (s) => console.log(`Failed: ${s.status}`),
-   *   onError: (e) => console.error('Polling error:', e.message),
-   *   onTimeout: () => console.log('Gave up after maxWaitMs'),
-   * }, { intervalMs: 5000, maxWaitMs: 16 * 60 * 1000 });
-   * ```
-   */
-  waitForPayment(
-    transactionId: string,
-    callbacks: PaymentCallbacks,
-    options: number | WaitForPaymentOptions = {},
-  ): () => void {
-    // Backwards compat: previously the 3rd argument was just intervalMs.
-    const opts: WaitForPaymentOptions =
-      typeof options === 'number' ? { intervalMs: options } : options;
-
-    const intervalMs           = opts.intervalMs           ?? DEFAULT_POLL_INTERVAL_MS;
-    const maxWaitMs            = opts.maxWaitMs            ?? 16 * 60 * 1000; // intent expires at 15 min, give 1 min margin
-    const maxConsecutiveErrors = opts.maxConsecutiveErrors ?? 5;
-
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const startedAt = Date.now();
-    let consecutiveErrors = 0;
-
-    const stop = () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-    };
-
-    const poll = async (): Promise<void> => {
-      if (stopped) return;
-
-      if (Date.now() - startedAt >= maxWaitMs) {
-        stopped = true;
-        await callbacks.onTimeout?.();
-        return;
-      }
-
-      try {
-        const result = await this.checkStatus(transactionId);
-        const data: PayStatusData = result.data;
-        consecutiveErrors = 0;
-
-        await callbacks.onUpdate?.(data);
-
-        if (data.status === 'completed') {
-          await callbacks.onCompleted?.(data);
-          stopped = true;
-          return;
+    constructor(config: PollarPayConfig) {
+        if (!config.apiKey) {
+            throw new PollarPayError(PAY_ERROR_CODES.INVALID_API_KEY, 'apiKey is required');
         }
 
-        if (data.status === 'overpaid') {
-          await callbacks.onOverpaid?.(data);
-          stopped = true;
-          return;
-        }
-
-        if (FINAL_STATUSES.includes(data.status) || data.is_expired) {
-          await callbacks.onFailed?.(data);
-          stopped = true;
-          return;
-        }
-
-        timer = setTimeout(poll, intervalMs);
-      } catch (error: unknown) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        consecutiveErrors += 1;
-        await callbacks.onError?.(err);
-
-        if (consecutiveErrors >= maxConsecutiveErrors) {
-          stopped = true;
-          await callbacks.onTimeout?.();
-          return;
-        }
-
-        // Exponential backoff: 5s → 10s → 20s → 40s, capped at 60s
-        const backoff = Math.min(intervalMs * 2 ** (consecutiveErrors - 1), 60_000);
-        if (!stopped) timer = setTimeout(poll, backoff);
-      }
-    };
-
-    poll();
-    return stop;
-  }
-
-  // ─── Internal HTTP ──────────────────────────────────────────────────────────
-
-  /**
-   * Makes an authenticated request to the Pollar Pay backend.
-   * Sends `x-pollar-api-key` header — same as @pollar/core.
-   */
-  private async _request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
-    const url = `${this._baseUrl}${path}`;
-
-    const headers: Record<string, string> = {
-      'x-pollar-api-key': this.apiKey,
-    };
-
-    const init: RequestInit = { method, headers };
-
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
+        this.apiKey = config.apiKey;
+        this.network = networkFromApiKey(config.apiKey);
+        this._baseUrl = resolveBaseUrl(config);
     }
 
-    let response: Response;
-    try {
-      response = await fetch(url, init);
-    } catch (err: unknown) {
-      throw new PollarPayError(
-        PAY_ERROR_CODES.NETWORK_ERROR,
-        `Network error: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    // ─── Crear cobro ────────────────────────────────────────────────────────
+
+    /**
+     * Crea un nuevo cobro.
+     *
+     * Lockea una wallet del pool por 15 minutos y devuelve la dirección Stellar
+     * donde el cliente debe enviar los USDC. La wallet se libera automáticamente
+     * cuando el timer vence o cuando se detecta el pago.
+     *
+     * @param amount Monto USDC a cobrar (0.01 – 1,000,000).
+     * @param reason Descripción del cobro (aparece en el dashboard del comercio).
+     *
+     * @throws {PollarPayError} `INVALID_AMOUNT` si el monto está fuera de rango.
+     * @throws {PollarPayError} `NO_WALLETS_AVAILABLE` si el pool está lleno.
+     * @throws {PollarPayError} `INVALID_API_KEY` si la API key es inválida.
+     */
+    async createIntent(amount: number | string, reason: string): Promise<PayIntentResponse> {
+        const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+
+        if (isNaN(parsedAmount) || parsedAmount < 0.01 || parsedAmount > 1_000_000) {
+            throw new PollarPayError(
+                PAY_ERROR_CODES.INVALID_AMOUNT,
+                'Amount must be between 0.01 and 1,000,000 USDC',
+            );
+        }
+
+        if (!reason || !reason.trim()) {
+            throw new PollarPayError(
+                PAY_ERROR_CODES.INVALID_AMOUNT,
+                'reason is required (1+ char)',
+            );
+        }
+
+        return this._request<PayIntentResponse>('POST', '/sdk/pay', {
+            amount_expected: parsedAmount.toString(),
+            reason: reason.trim(),
+        });
     }
 
-    const data = await response.json() as T & { error?: string };
+    // ─── Consultar estado ──────────────────────────────────────────────────
 
-    if (!response.ok) {
-      const errorMessage = data.error ?? `HTTP ${response.status}`;
+    /**
+     * Consulta el estado actual de un cobro.
+     *
+     * Si la transacción está `pending`, el backend dispara una verificación
+     * on-chain inmediata. Es decir: cada `checkStatus()` no solo lee la DB,
+     * también pregunta a Horizon. Por eso `waitForPayment()` con polling
+     * funciona aún sin SSE.
+     *
+     * @param transactionId El `transaction_id` devuelto por `createIntent()`.
+     *
+     * @throws {PollarPayError} `TRANSACTION_NOT_FOUND` si el cobro no existe.
+     */
+    async checkStatus(transactionId: string): Promise<PayStatusResponse> {
+        if (!transactionId) {
+            throw new PollarPayError(
+                PAY_ERROR_CODES.TRANSACTION_NOT_FOUND,
+                'transactionId is required',
+            );
+        }
 
-      if (response.status === 401) {
-        throw new PollarPayError(PAY_ERROR_CODES.INVALID_API_KEY, errorMessage);
-      }
-      if (response.status === 404) {
-        throw new PollarPayError(PAY_ERROR_CODES.TRANSACTION_NOT_FOUND, errorMessage);
-      }
-      if (response.status === 503) {
-        throw new PollarPayError(PAY_ERROR_CODES.NO_WALLETS_AVAILABLE, errorMessage);
-      }
-
-      throw new PollarPayError(PAY_ERROR_CODES.NETWORK_ERROR, errorMessage);
+        const params = new URLSearchParams({ transaction_id: transactionId });
+        return this._request<PayStatusResponse>('GET', `/sdk/status?${params.toString()}`);
     }
 
-    return data;
-  }
+    // ─── Cerrar manualmente ─────────────────────────────────────────────────
+
+    /**
+     * Marca un cobro como cerrado manualmente. Útil cuando el cliente paga en
+     * efectivo y querés reflejarlo en el dashboard.
+     *
+     * Si llegaron fondos parciales on-chain antes del cierre manual, el backend
+     * los reenvía al `payout_wallet` del comercio antes de cerrar la tx.
+     */
+    async manualComplete(transactionId: string): Promise<PayManualCompleteResponse> {
+        if (!transactionId) {
+            throw new PollarPayError(
+                PAY_ERROR_CODES.TRANSACTION_NOT_FOUND,
+                'transactionId is required',
+            );
+        }
+
+        return this._request<PayManualCompleteResponse>('POST', '/sdk/manual-complete', {
+            transaction_id: transactionId,
+        });
+    }
+
+    // ─── waitForPayment ─────────────────────────────────────────────────────
+
+    /**
+     * Polea el estado de un cobro y dispara callbacks cuando cambia.
+     *
+     * Se detiene solo cuando el cobro alcanza un estado final, cuando se
+     * cumple `options.maxWaitMs`, o cuando hay demasiados errores
+     * consecutivos. Devuelve una función `stop()` para cancelar manualmente.
+     *
+     * Los callbacks pueden ser async — el SDK awaitea las promesas, así que
+     * podés hacer `await sendEmail(s)` dentro de `onCompleted` con seguridad.
+     *
+     * Los errores aplican backoff exponencial (5s → 10s → 20s → 40s, tope 60s)
+     * y se rinden después de `maxConsecutiveErrors`.
+     *
+     * @example
+     * ```ts
+     * const stop = pay.waitForPayment(transactionId, {
+     *   onUpdate:    (s) => console.log('paid:', s.amount_paid),
+     *   onCompleted: async (s) => { await fulfillOrder(s); },
+     *   onOverpaid:  (s) => console.log('overpaid:', s.amount_paid),
+     *   onFailed:    (s) => console.log('failed:', s.status),
+     *   onError:     (e) => console.error(e.message),
+     *   onTimeout:   ()  => console.log('took too long'),
+     * }, { intervalMs: 5000, maxWaitMs: 16 * 60 * 1000 });
+     * ```
+     */
+    waitForPayment(
+        transactionId: string,
+        callbacks: PaymentCallbacks,
+        options: number | WaitForPaymentOptions = {},
+    ): () => void {
+        // Compat: la 3ra arg solía ser solo intervalMs.
+        const opts: WaitForPaymentOptions =
+            typeof options === 'number' ? { intervalMs: options } : options;
+
+        const intervalMs           = opts.intervalMs           ?? DEFAULT_POLL_INTERVAL_MS;
+        const maxWaitMs            = opts.maxWaitMs            ?? 16 * 60 * 1000;
+        const maxConsecutiveErrors = opts.maxConsecutiveErrors ?? 5;
+
+        let stopped = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const startedAt = Date.now();
+        let consecutiveErrors = 0;
+
+        const stop = () => {
+            stopped = true;
+            if (timer) clearTimeout(timer);
+        };
+
+        const poll = async (): Promise<void> => {
+            if (stopped) return;
+
+            if (Date.now() - startedAt >= maxWaitMs) {
+                stopped = true;
+                await callbacks.onTimeout?.();
+                return;
+            }
+
+            try {
+                const result = await this.checkStatus(transactionId);
+                const data: PayStatusData = result.data;
+                consecutiveErrors = 0;
+
+                await callbacks.onUpdate?.(data);
+
+                if (data.status === 'completed') {
+                    await callbacks.onCompleted?.(data);
+                    stopped = true;
+                    return;
+                }
+
+                if (data.status === 'overpaid') {
+                    await callbacks.onOverpaid?.(data);
+                    stopped = true;
+                    return;
+                }
+
+                if (FINAL_STATUSES.includes(data.status) || data.is_expired) {
+                    await callbacks.onFailed?.(data);
+                    stopped = true;
+                    return;
+                }
+
+                timer = setTimeout(poll, intervalMs);
+            } catch (error: unknown) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                consecutiveErrors += 1;
+                await callbacks.onError?.(err);
+
+                if (consecutiveErrors >= maxConsecutiveErrors) {
+                    stopped = true;
+                    await callbacks.onTimeout?.();
+                    return;
+                }
+
+                const backoff = Math.min(intervalMs * 2 ** (consecutiveErrors - 1), 60_000);
+                if (!stopped) timer = setTimeout(poll, backoff);
+            }
+        };
+
+        poll();
+        return stop;
+    }
+
+    // ─── HTTP interno ───────────────────────────────────────────────────────
+
+    /**
+     * Hace una request autenticada al backend Pollar Pay. Manda el header
+     * `x-pollar-api-key` que es lo que el backend lee para autenticar.
+     */
+    private async _request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+        const url = `${this._baseUrl}${path}`;
+
+        const headers: Record<string, string> = {
+            'x-pollar-api-key': this.apiKey,
+        };
+
+        const init: RequestInit = { method, headers };
+
+        if (body !== undefined) {
+            headers['Content-Type'] = 'application/json';
+            init.body = JSON.stringify(body);
+        }
+
+        let response: Response;
+        try {
+            response = await fetch(url, init);
+        } catch (err: unknown) {
+            throw new PollarPayError(
+                PAY_ERROR_CODES.NETWORK_ERROR,
+                `Network error: ${err instanceof Error ? err.message : String(err)}`,
+            );
+        }
+
+        const data = (await response.json()) as T & { error?: string };
+
+        if (!response.ok) {
+            const errorMessage = data.error ?? `HTTP ${response.status}`;
+
+            if (response.status === 401) {
+                throw new PollarPayError(PAY_ERROR_CODES.INVALID_API_KEY, errorMessage);
+            }
+            if (response.status === 404) {
+                throw new PollarPayError(PAY_ERROR_CODES.TRANSACTION_NOT_FOUND, errorMessage);
+            }
+            if (response.status === 503) {
+                throw new PollarPayError(PAY_ERROR_CODES.NO_WALLETS_AVAILABLE, errorMessage);
+            }
+
+            throw new PollarPayError(PAY_ERROR_CODES.NETWORK_ERROR, errorMessage);
+        }
+
+        return data;
+    }
 }

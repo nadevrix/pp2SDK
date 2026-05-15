@@ -1,20 +1,31 @@
 // ─── @pollar/pay — Public API ────────────────────────────────────────────────
-// Everything exported from this file is part of the public API.
-// Follow the same export pattern as @pollar/core/index.ts.
+// Todo lo que se exporta acá es parte de la API pública del SDK.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export { PollarPayClient } from './client';
 
 export type {
-  PollarPayConfig,
-  PayIntentResponse,
-  PayIntentData,
-  PayStatusResponse,
-  PayStatusData,
-  PaymentStatus,
-  PaymentCallbacks,
-  WaitForPaymentOptions,
-  PayErrorCode,
+    PollarPayConfig,
+    PayIntentResponse,
+    PayIntentData,
+    PayStatusResponse,
+    PayStatusData,
+    PayManualCompleteResponse,
+    PaymentStatus,
+    PaymentCallbacks,
+    WaitForPaymentOptions,
+    PayErrorCode,
+    StellarNetwork,
 } from './types';
 
 export { PAY_ERROR_CODES, FINAL_STATUSES, PollarPayError } from './types';
+
+export {
+    buildSep7PayUri,
+    buildStellarExpertTxUrl,
+    buildStellarExpertAccountUrl,
+    networkFromApiKey,
+    normalizeNetwork,
+    USDC_ISSUERS,
+    NETWORK_PASSPHRASES,
+} from './stellar';

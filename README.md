@@ -1,171 +1,412 @@
 # @pollar/pay
 
-Accept USDC payments on Stellar — the official SDK for Pollar Pay.
+SDK oficial de **Pollar Pay** — acepta pagos en USDC sobre Stellar.
 
-`@pollar/pay` lets your app generate USDC payment intents and watch them settle on-chain. Customers can pay from **Binance, Meru, Lobstr or any Stellar-compatible wallet**. Settlement happens in **3 – 5 seconds**, 24/7, with no bank or intermediary involved.
-
-Authenticate with the publishable API key issued by your Pollar Pay branch — no extra credentials.
-
-## Install
+Tus clientes pagan desde **Binance, Meru, Lobstr** o cualquier wallet Stellar.
+La liquidación tarda **3 – 5 segundos**, 24/7, sin bancos ni intermediarios.
+Los fondos van directo a la wallet del comercio — Pollar no custodia nada.
 
 ```bash
 npm install @pollar/pay
 ```
 
+---
+
+## Tabla de contenido
+
+- [Quick start](#quick-start)
+- [Cómo funciona](#cómo-funciona)
+- [Generar el QR (SEP-7)](#generar-el-qr-sep-7)
+- [Escenarios de pago](#escenarios-de-pago)
+- [API](#api)
+- [Helpers](#helpers)
+- [Manejo de errores](#manejo-de-errores)
+- [Estados del cobro](#estados-del-cobro)
+- [Trazabilidad on-chain](#trazabilidad-on-chain)
+- [TypeScript](#typescript)
+- [Ejemplos](#ejemplos)
+
+---
+
 ## Quick start
 
 ```typescript
-import { PollarPayClient } from '@pollar/pay';
+import { PollarPayClient, buildSep7PayUri } from '@pollar/pay';
 
 const pay = new PollarPayClient({
-  apiKey: 'pub_testnet_703470595eb6cb72c18651b1455fdc34',
+  apiKey: 'pub_testnet_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
 });
 
-// 1. Create a payment intent for 25 USDC
-const intent = await pay.createIntent(25.00, 'Order #1234');
+// 1. Crear cobro de 25 USDC
+const intent = await pay.createIntent(25, 'Pedido #1234');
 
-console.log(intent.data.wallet_address);  // → Stellar address — render as QR
-console.log(intent.data.transaction_id);  // → use for status polling
-console.log(intent.data.expires_at);      // → 15-minute expiration
+// 2. Mostrar el QR — cualquier wallet Stellar entiende la URI SEP-7
+const qrUri = buildSep7PayUri(intent.data);
+//    → "web+stellar:pay?destination=GAB...&amount=25&asset_code=USDC&asset_issuer=GA5Z..."
 
-// 2. Poll until paid (3–5 s settlement on Stellar)
+// 3. Esperar a que el cliente pague (3 – 5 s sobre Stellar)
 const stop = pay.waitForPayment(intent.data.transaction_id, {
-  onUpdate: (s) => console.log(`status=${s.status} paid=${s.amount_paid}`),
-  onCompleted: (s) => console.log('Paid:', s.amount_paid, 'USDC'),
-  onOverpaid: (s) => console.log('Overpaid — contact support'),
-  onFailed: (s) => console.log('Not completed:', s.status),
+  onCompleted: (s) => console.log('Pagado:', s.amount_paid, 'USDC'),
+  onOverpaid:  (s) => console.log('Excedente — soporte va a contactarte'),
+  onFailed:    (s) => console.log('No completado:', s.status),
 });
 
-// Call stop() to cancel polling manually
+// stop() cancela el polling manualmente si lo necesitás
 ```
 
-## QR code (SEP-0007)
+La `apiKey` es la que sacás de **Dashboard → Avanzado** para cada sucursal.
+Empieza con `pub_testnet_` o `pub_mainnet_` y el SDK detecta solo la red.
 
-The customer's wallet expects a SEP-0007 `web+stellar:pay` URI. Build it from the intent:
+---
+
+## Cómo funciona
+
+```
+┌─────────────────┐         ┌──────────────────┐         ┌──────────────────┐
+│   tu app/POS    │ ──────► │  @pollar/pay     │ ──────► │  Pollar Pay API  │
+│  (Node/browser) │ ◄────── │  (este SDK)      │ ◄────── │  (backend HTTPS) │
+└─────────────────┘         └──────────────────┘         └──────────────────┘
+                                                                  │
+                                                                  ▼
+                                                         ┌──────────────────┐
+                                                         │ Stellar Horizon  │
+                                                         │ (mainnet/testnet)│
+                                                         └──────────────────┘
+                                                                  │
+                                                                  ▼
+                                                         payout_wallet del
+                                                          comercio (vos)
+```
+
+1. **`createIntent(amount, reason)`** lockea una wallet del pool por 15 minutos y devuelve su pubkey.
+2. Tu app renderiza esa pubkey como **QR SEP-7** (ver abajo).
+3. El cliente paga en USDC desde su wallet preferida.
+4. **`waitForPayment()`** polea el backend; cada poll dispara un re-check on-chain.
+5. Al completarse, los fondos se **reenvían automáticamente** a la wallet del comercio.
+
+> Pollar **nunca custodia los fondos**. La wallet del comercio es una cuenta real en Stellar.
+
+---
+
+## Generar el QR (SEP-7)
+
+El SDK te da `buildSep7PayUri()` — no hace falta que armes la URI a mano:
 
 ```typescript
-const USDC_ISSUERS = {
-  MAINNET: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-  TESTNET: 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
-};
+import { buildSep7PayUri } from '@pollar/pay';
 
-function buildPaymentUri(intent) {
-  const issuer = USDC_ISSUERS[intent.data.network];
-  return `web+stellar:pay?destination=${intent.data.wallet_address}` +
-         `&amount=${intent.data.amount}` +
-         `&asset_code=USDC&asset_issuer=${issuer}`;
-}
+const uri = buildSep7PayUri(intent.data);
 ```
 
-Any Stellar wallet — Binance, Meru, Lobstr, Freighter — recognises this URI and pre-fills the payment with the correct amount.
+Lo que devuelve es la URI `web+stellar:pay?…` con destino, monto, asset code,
+issuer USDC oficial y (en testnet) el `network_passphrase`. Cualquier wallet
+Stellar — Binance, Meru, Lobstr, Freighter — la entiende y autocompleta los
+campos.
 
-## How it works
+Para renderizar el QR podés usar cualquier librería:
 
-1. **`createIntent(amount, reason)`** locks a Stellar wallet from the pool for 15 minutes and returns its public key.
-2. Your app shows that public key as a **QR code** (see above).
-3. The customer pays in USDC from any Stellar wallet.
-4. **`waitForPayment()`** polls the backend; each poll asks Stellar Horizon for new payments on that wallet.
-5. On completion the funds are **automatically forwarded** to your branch's payout wallet.
+```typescript
+// React
+import { QRCodeSVG } from 'qrcode.react';
+<QRCodeSVG value={uri} size={256} />
 
-Pollar never custodies the funds — the payout wallet is yours.
+// Vanilla / browser
+import qrcode from 'qrcode-generator';
+const qr = qrcode(0, 'M');
+qr.addData(uri);
+qr.make();
+document.getElementById('qr').innerHTML = qr.createSvgTag({ cellSize: 4 });
 
-## Payment scenarios
+// Node
+import QRCode from 'qrcode';
+await QRCode.toFile('qr.png', uri);
+```
 
-The SDK and backend handle the four real-world cases automatically:
+---
 
-| Scenario | Behaviour |
-|---|---|
-| **Exact payment** | Intent closes as `completed`. Funds forwarded. |
-| **Partial payment** | Intent stays open showing `remaining` until completed or expired. Multiple senders can contribute. |
-| **Overpayment** | Intent closes as `overpaid`. The merchant receives the full amount; excess is registered for support to settle. |
-| **No payment** | Intent expires as `expired` after 15 minutes. |
+## Escenarios de pago
+
+El SDK y el backend manejan los 4 casos automáticamente — vos solo te enterás
+del estado final vía callbacks.
+
+| Escenario | Qué hace el sistema | Callback que recibís |
+|---|---|---|
+| **Pago exacto** | Cierra como `completed`. Reenvía fondos al comercio. | `onCompleted` |
+| **Pago parcial** | El intent queda abierto mostrando `remaining`. Cualquier pagador puede completarlo. | (`onUpdate` con `amount_paid` parcial; final `onCompleted` o `onFailed` si expira) |
+| **Múltiples pagadores** | Cada contribución se acumula. Wallet sigue asignada hasta cerrar el monto. | `onUpdate` por cada pago, `onCompleted` cuando se completa |
+| **Overpago** | El comercio recibe el 100 % solicitado. El excedente queda registrado y trazado en el sistema. | `onOverpaid` |
+| **Sin pago** | Tras 15 min expira como `expired`. La wallet se libera. | `onFailed` |
+
+---
 
 ## API
 
 ### `new PollarPayClient(config)`
 
-| Param | Type | Required | Description |
+| Param | Tipo | Requerido | Descripción |
 |---|---|---|---|
-| `config.apiKey` | `string` | ✅ | Pollar publishable key (`pub_testnet_xxx` or `pub_mainnet_xxx`) |
-| `config.baseUrl` | `string` | — | Override backend URL. Auto-resolved from key prefix. |
+| `config.apiKey` | `string` | ✅ | API key publishable (`pub_testnet_…` o `pub_mainnet_…`) |
+| `config.baseUrl` | `string` | — | Override de la URL del backend. Por defecto se autoresuelve |
+
+Propiedades del cliente:
+
+- `pay.apiKey` — la apiKey que pasaste.
+- `pay.network` — `'TESTNET'` o `'MAINNET'`, derivado del prefijo de la apiKey.
 
 ### `pay.createIntent(amount, reason)`
 
-Creates a payment intent. Returns `wallet_address`, `transaction_id`, `amount`, `expires_at`, and `network`.
+Crea un cobro. Devuelve `wallet_address`, `transaction_id`, `amount`, `expires_at`, `network`.
 
-| Param | Type | Description |
+| Param | Tipo | Descripción |
 |---|---|---|
-| `amount` | `number \| string` | USDC amount (0.01 – 1,000,000) |
-| `reason` | `string` | Description shown on the merchant dashboard (e.g. "Order #1234") |
+| `amount` | `number \| string` | Monto USDC (0.01 – 1,000,000) |
+| `reason` | `string` | Motivo del cobro (lo ve el comercio en el dashboard) |
 
 ### `pay.checkStatus(transactionId)`
 
-Returns the current payment state — `amount_paid`, `remaining`, `time_remaining_seconds`, `forward_tx_hash`, etc. Triggers an on-chain re-check when the intent is still `pending`.
+Devuelve el estado actual: `status`, `amount_paid`, `remaining`, `time_remaining_seconds`,
+`fee_amount`, `payout_amount`, `is_free_tx`, `forward_status`, `forward_tx_hash`, etc.
+
+Cada llamada con `status='pending'` dispara una re-verificación on-chain en el
+backend, así que el polling siempre tiene datos frescos.
 
 ### `pay.waitForPayment(transactionId, callbacks, options?)`
 
-Polls every 5 s (configurable). Stops automatically on terminal status. Returns a `stop()` function to cancel manually.
+Polea cada 5 s (configurable). Se detiene automático cuando el cobro llega a
+un estado final. Devuelve `stop()` para cancelar manualmente.
 
-| Callback | When it fires |
+| Callback | Cuándo se dispara |
 |---|---|
-| `onUpdate` | Every poll |
-| `onCompleted` | Exact amount received, funds forwarded |
-| `onOverpaid` | Customer paid more than expected |
-| `onFailed` | Expired, underpaid, or anomaly |
-| `onError` | Network error during polling (retried with backoff) |
-| `onTimeout` | `maxWaitMs` reached or too many consecutive errors |
+| `onUpdate` | En cada poll, con el último estado |
+| `onCompleted` | Pago exacto recibido, fondos reenviados al comercio |
+| `onOverpaid` | El cliente pagó más de lo esperado |
+| `onFailed` | Expiró, parcial-y-venció, o anomalía |
+| `onError` | Un poll falló (sigue con backoff exponencial) |
+| `onTimeout` | Llegó al `maxWaitMs` o demasiados errores consecutivos |
+
+Opciones:
+
+| Opción | Default | Descripción |
+|---|---|---|
+| `intervalMs` | `5000` | Intervalo entre polls |
+| `maxWaitMs` | `960000` (16 min) | Tiempo máximo total de polling |
+| `maxConsecutiveErrors` | `5` | Errores seguidos antes de rendirse |
 
 ### `pay.manualComplete(transactionId)`
 
-Closes an intent off-chain (useful when the customer paid in cash and you want to mark the cobro as settled).
+Cierra un intent off-chain. Útil cuando el cliente pagó en efectivo y querés
+que el cobro figure como completado. Si llegaron fondos parciales on-chain
+antes del cierre, el backend los reenvía al comercio primero.
 
-## Error handling
+---
 
-All methods throw `PollarPayError` with a typed `code`:
+## Helpers
+
+Funciones puras, cero deps, exportadas desde el paquete:
+
+```typescript
+import {
+  buildSep7PayUri,                // arma la URI del QR
+  buildStellarExpertTxUrl,        // link al hash en Stellar Expert
+  buildStellarExpertAccountUrl,   // link a la cuenta en Stellar Expert
+  networkFromApiKey,              // 'pub_mainnet_…' → 'MAINNET'
+  normalizeNetwork,               // string arbitrario → 'TESTNET' | 'MAINNET'
+  USDC_ISSUERS,                   // { MAINNET, TESTNET } — issuers oficiales
+  NETWORK_PASSPHRASES,            // passphrases oficiales por red
+} from '@pollar/pay';
+```
+
+Ejemplo armando el link al comprobante:
+
+```typescript
+const status = await pay.checkStatus(transactionId);
+if (status.data.forward_tx_hash) {
+  const url = buildStellarExpertTxUrl(
+    status.data.forward_tx_hash,
+    pay.network,
+  );
+  console.log('Comprobante:', url);
+  // → https://stellar.expert/explorer/testnet/tx/abc123...
+}
+```
+
+---
+
+## Manejo de errores
+
+Todos los métodos arrojan `PollarPayError` con un `code` tipado:
 
 ```typescript
 import { PollarPayClient, PollarPayError, PAY_ERROR_CODES } from '@pollar/pay';
 
 try {
-  await pay.createIntent(25, 'Order #1234');
+  await pay.createIntent(25, 'Pedido #1234');
 } catch (err) {
   if (err instanceof PollarPayError) {
     switch (err.code) {
       case PAY_ERROR_CODES.NO_WALLETS_AVAILABLE:
-        // Pool busy — retry in ~1 minute
+        // Pool ocupado — reintentar en ~1 min
         break;
       case PAY_ERROR_CODES.INVALID_API_KEY:
-        // Bad credential
+        // Credencial inválida o sin Pollar Pay habilitado
         break;
       case PAY_ERROR_CODES.INVALID_AMOUNT:
-        // Out of allowed range
+        // Fuera del rango 0.01 – 1,000,000
+        break;
+      case PAY_ERROR_CODES.NETWORK_ERROR:
+        // Backend o red caídos
         break;
     }
   }
 }
 ```
 
-## Payment statuses
+---
 
-| Status | Description |
+## Estados del cobro
+
+| Status | Significado |
 |---|---|
-| `pending` | Waiting for USDC from customer |
-| `completed` | Exact (or above) amount received, funds forwarded |
-| `overpaid` | Customer paid more than expected |
-| `underpaid` | Timer expired with partial payment |
-| `expired` | Timer expired with no payment |
-| `refunded` | Admin issued a refund |
-| `anomaly` | Forward failed — needs manual review |
+| `pending` | Esperando USDC del cliente |
+| `completed` | Monto exacto (o más) recibido, fondos reenviados |
+| `overpaid` | El cliente pagó más de lo esperado |
+| `underpaid` | Timer venció con pago parcial |
+| `expired` | Timer venció sin ningún pago |
+| `refunded` | Admin emitió reembolso desde treasury |
+| `anomaly` | Forward falló — requiere revisión manual |
 
-## Trustless by design
+---
 
-Every payment leaves an on-chain trail. Inspect any transaction on [Stellar Expert](https://stellar.expert):
+## Trazabilidad on-chain
+
+Cada cobro deja un rastro verificable en Stellar:
 
 ```typescript
-const result = await pay.checkStatus(transactionId);
-const hash = result.data.forward_tx_hash;
-const url = `https://stellar.expert/explorer/public/tx/${hash}`;
+import { buildStellarExpertTxUrl } from '@pollar/pay';
+
+const status = await pay.checkStatus(transactionId);
+if (status.data.forward_tx_hash) {
+  const url = buildStellarExpertTxUrl(status.data.forward_tx_hash, pay.network);
+  // Mostrale al cliente: "Ver comprobante en Stellar Expert"
+}
 ```
+
+Ningún servicio centralizado puede ofrecer esto — los hashes son públicos y
+permanentes.
+
+---
+
+## TypeScript
+
+El SDK está escrito en TypeScript y publica tipos completos. Los tipos
+importantes:
+
+```typescript
+import type {
+  PollarPayConfig,
+  PayIntentData,
+  PayStatusData,
+  PaymentStatus,
+  PaymentCallbacks,
+  WaitForPaymentOptions,
+  StellarNetwork,
+  PayErrorCode,
+} from '@pollar/pay';
+```
+
+Funciona en Node 18+, Deno, Bun, browsers modernos y edge runtimes (Vercel
+Edge, Cloudflare Workers, etc.).
+
+---
+
+## Ejemplos
+
+### Express / Node — checkout estilo Stripe
+
+```typescript
+import express from 'express';
+import { PollarPayClient, buildSep7PayUri } from '@pollar/pay';
+
+const pay = new PollarPayClient({ apiKey: process.env.POLLAR_API_KEY! });
+const app = express();
+app.use(express.json());
+
+app.post('/api/checkout', async (req, res) => {
+  const intent = await pay.createIntent(req.body.amount, req.body.reason);
+  res.json({
+    transaction_id: intent.data.transaction_id,
+    sep7_uri: buildSep7PayUri(intent.data),
+    expires_at: intent.data.expires_at,
+  });
+});
+
+app.get('/api/checkout/:id', async (req, res) => {
+  const status = await pay.checkStatus(req.params.id);
+  res.json(status.data);
+});
+```
+
+> **Importante**: la `apiKey` vive solo en el server. El browser nunca la ve.
+
+### React — esperar pago con callbacks
+
+```typescript
+import { useEffect, useState } from 'react';
+import { PollarPayClient, buildSep7PayUri, type PayStatusData } from '@pollar/pay';
+
+const pay = new PollarPayClient({ apiKey: 'pub_testnet_…' });
+
+function Checkout({ amount, reason }) {
+  const [intent, setIntent] = useState(null);
+  const [status, setStatus] = useState<PayStatusData | null>(null);
+
+  useEffect(() => {
+    pay.createIntent(amount, reason).then(r => setIntent(r.data));
+  }, [amount, reason]);
+
+  useEffect(() => {
+    if (!intent) return;
+    const stop = pay.waitForPayment(intent.transaction_id, {
+      onUpdate:    s => setStatus(s),
+      onCompleted: s => setStatus(s),
+      onOverpaid:  s => setStatus(s),
+      onFailed:    s => setStatus(s),
+    });
+    return stop;
+  }, [intent]);
+
+  if (!intent) return <p>Generando cobro…</p>;
+  const uri = buildSep7PayUri(intent);
+
+  return (
+    <div>
+      <QR value={uri} />
+      <p>{status?.status ?? 'pending'}</p>
+    </div>
+  );
+}
+```
+
+### Vanilla JS — POS de mostrador
+
+```typescript
+import { PollarPayClient, buildSep7PayUri } from '@pollar/pay';
+
+const pay = new PollarPayClient({ apiKey: prompt('apiKey?') });
+
+async function cobrar(monto) {
+  const intent = await pay.createIntent(monto, 'Mostrador');
+  document.querySelector('#qr').src =
+    `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(buildSep7PayUri(intent.data))}`;
+
+  pay.waitForPayment(intent.data.transaction_id, {
+    onCompleted: () => alert('¡Cobrado!'),
+    onFailed:    s => alert('No completado: ' + s.status),
+  });
+}
+```
+
+---
 
 ## License
 

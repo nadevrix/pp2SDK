@@ -1,7 +1,7 @@
 {
   "name": "@pollar/pay",
-  "version": "0.1.0",
-  "description": "Accept USDC payments on Stellar — part of the Pollar SDK",
+  "version": "0.2.0",
+  "description": "Accept USDC payments on Stellar — official SDK for Pollar Pay",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
