@@ -84,16 +84,18 @@ export interface PayIntentData {
 /**
  * Estados posibles de un cobro.
  *
- * | Status         | Cuándo ocurre                                              |
- * |----------------|------------------------------------------------------------|
- * | `pending`      | Esperando que el cliente pague                             |
- * | `completed`    | Monto exacto (o más) recibido, fondos enviados al comercio |
- * | `overpaid`     | El cliente pagó más de lo esperado                         |
- * | `underpaid`    | Venció el timer con pago parcial                           |
- * | `expired`      | Venció el timer sin ningún pago                            |
- * | `refunded`     | Admin emitió un reembolso desde treasury                   |
- * | `anomaly`      | Forward falló o error inesperado — requiere revisión       |
- * | `late_anomaly` | Reservado para casos edge (actualmente no se asigna)       |
+ * | Status         | Cuándo ocurre                                                       |
+ * |----------------|---------------------------------------------------------------------|
+ * | `pending`      | Esperando que el cliente pague                                      |
+ * | `completed`    | Monto exacto recibido, fondos enviados al comercio (gross − fee)    |
+ * | `overpaid`     | El cliente pagó MÁS de lo esperado. El comercio recibe solo lo      |
+ * |                | esperado (− fee). El excedente queda en la treasury de Pollar Pay;  |
+ * |                | si el cliente lo reclama vía soporte, se devuelve manualmente.      |
+ * | `underpaid`    | Venció el timer con pago parcial (received < expected)              |
+ * | `expired`      | Venció el timer sin ningún pago                                     |
+ * | `refunded`     | Admin emitió un reembolso desde treasury                            |
+ * | `anomaly`      | Forward falló o error inesperado — requiere revisión                |
+ * | `late_anomaly` | Reservado para casos edge (actualmente no se asigna)                |
  */
 export type PaymentStatus =
     | 'pending'
