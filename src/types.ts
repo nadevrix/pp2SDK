@@ -63,6 +63,20 @@ export interface PayIntentData {
 
     /** Red Stellar (`TESTNET` o `MAINNET`). */
     network: StellarNetwork;
+
+    /**
+     * URL del Hosted Checkout de Pollar Pay para este intent. Redirigí al
+     * cliente acá y nos encargamos del resto (QR, status en vivo, verificar,
+     * compartir por WhatsApp, redirect de vuelta al comercio si pasás
+     * `success_url`).
+     *
+     * @example
+     * ```ts
+     * const { data } = await pay.createIntent(25, 'Pedido #123');
+     * res.redirect(`${data.checkout_url}?success_url=https://mi-tienda.com/ok`);
+     * ```
+     */
+    checkout_url: string;
 }
 
 // ─── Payment Status ─────────────────────────────────────────────────────────

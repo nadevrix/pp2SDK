@@ -28,7 +28,30 @@ npm install @pollar/pay
 
 ---
 
-## Quick start
+## Quick start — Modo simple (Hosted Checkout) ⭐
+
+Es lo más rápido. El cliente termina el pago en una página de Pollar Pay y vuelve solo. **2 líneas** en el backend del comercio:
+
+```typescript
+import { PollarPayClient } from '@pollar/pay';
+
+const pay = new PollarPayClient({ apiKey: 'pub_testnet_xxx' });
+
+// En tu endpoint POST /checkout:
+const intent = await pay.createIntent(25, 'Pedido #1234');
+res.redirect(`${intent.data.checkout_url}?success_url=https://mi-tienda.com/ok`);
+//             └─ página pública con QR + status en vivo + botón verificar
+```
+
+El cliente cae en `https://pp2front.vercel.app/checkout/<intent_id>`, ve el QR, paga desde Binance/Lobstr/Meru, y cuando se confirma se redirige a tu `success_url?tx=<id>&status=completed`.
+
+Sirve para cualquier stack: Node, PHP, Python, Go, WordPress — es un redirect HTTP, no requiere JS.
+
+---
+
+## Modo avanzado — QR propio
+
+Si querés controlar la UI del pago (embebido en tu app, sin redirect):
 
 ```typescript
 import { PollarPayClient, buildSep7PayUri } from '@pollar/pay';
@@ -52,6 +75,18 @@ const stop = pay.waitForPayment(intent.data.transaction_id, {
 });
 
 // stop() cancela el polling manualmente si lo necesitás
+```
+
+### Botón "Verificar pago" propio
+
+```tsx
+// React — botón para forzar la verificación contra Horizon
+<button onClick={async () => {
+  const { data } = await pay.checkStatus(intent.transaction_id);
+  if (data.status === 'completed') alert('¡Pagado!');
+}}>
+  Verificar pago
+</button>
 ```
 
 La `apiKey` es la que sacás de **Dashboard → Avanzado** para cada sucursal.
