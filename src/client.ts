@@ -24,28 +24,27 @@ import { networkFromApiKey } from './stellar';
 /** Intervalo por defecto de `waitForPayment()`. */
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-/** URLs por defecto del backend según red. */
-const BASE_URLS = {
-    testnet: 'https://pp1back.vercel.app/api',
-    mainnet: 'https://pp1back.vercel.app/api',
-    local: 'http://localhost:3000/api',
-} as const;
+// Hoy Pollar Pay corre solo en TESTNET. Cuando lancemos mainnet, agregamos
+// `mainnet` en este mapa y enriquecemos `resolveBaseUrl` para distinguir por
+// prefijo de apiKey. Mientras tanto, si llega una key `pub_mainnet_*`,
+// preferimos fallar explícito antes que apuntarla al backend de testnet por
+// inercia.
+const TESTNET_BASE_URL = 'https://pp1back.vercel.app/api';
+const LOCAL_BASE_URL = 'http://localhost:3000/api';
 
-/**
- * Resuelve la URL del backend a partir del prefijo de la apiKey o de un override
- * explícito en config.
- *
- *   - `pub_testnet_…` → testnet
- *   - `pub_mainnet_…` → mainnet
- *   - cualquier otra cosa → local (desarrollo)
- */
 function resolveBaseUrl(config: PollarPayConfig): string {
     if (config.baseUrl) return config.baseUrl;
 
-    if (config.apiKey.startsWith('pub_mainnet_')) return BASE_URLS.mainnet;
-    if (config.apiKey.startsWith('pub_testnet_')) return BASE_URLS.testnet;
+    if (config.apiKey.startsWith('pub_mainnet_')) {
+        throw new PollarPayError(
+            PAY_ERROR_CODES.INVALID_API_KEY,
+            'Mainnet API keys aún no están soportadas. Pasá `baseUrl` explícito si querés apuntar a un backend custom.',
+        );
+    }
+    if (config.apiKey.startsWith('pub_testnet_')) return TESTNET_BASE_URL;
 
-    return BASE_URLS.local;
+    // Sin prefijo conocido → asumimos desarrollo local.
+    return LOCAL_BASE_URL;
 }
 
 /**
